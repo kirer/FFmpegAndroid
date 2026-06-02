@@ -66,18 +66,19 @@ set_target_properties( ffmpeg
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++11")
 
+set(EXTRA_FFMPEG ../../../../extra/ffmpeg)
+
 include_directories(.)
-include_directories(include)
+include_directories(${EXTRA_FFMPEG}/include)
 include_directories(metadata)
-include_directories(ffplayer)
 
 if(${CMAKE_ANDROID_ARCH_ABI} MATCHES "armeabi-v7a")
-    include_directories(include/armeabi-v7a/libavcodec)
-    include_directories(include/armeabi-v7a/libavutil)
+    include_directories(${EXTRA_FFMPEG}/include/armeabi-v7a/libavcodec)
+    include_directories(${EXTRA_FFMPEG}/include/armeabi-v7a/libavutil)
     message("This is armeabi-v7a")
 elseif(${CMAKE_ANDROID_ARCH_ABI} MATCHES "arm64-v8a")
-    include_directories(include/arm64-v8a/libavcodec)
-    include_directories(include/arm64-v8a/libavutil)
+    include_directories(${EXTRA_FFMPEG}/include/arm64-v8a/libavcodec)
+    include_directories(${EXTRA_FFMPEG}/include/arm64-v8a/libavutil)
     message("This is arm64-v8a")
 endif()
 
