@@ -141,9 +141,9 @@ struct PlayerLink {
     volatile int64_t last_seek_load_start    = 0;
     volatile int64_t accurate_seek_video_pts = 0;
     volatile int64_t accurate_seek_audio_pts = 0;
-    std::unique_ptr<NextMediaClock> audio_clock;
-    std::unique_ptr<NextMediaClock> video_clock;
-    std::unique_ptr<NextMediaClock> external_clock;
+    std::unique_ptr<MediaClock> audio_clock;
+    std::unique_ptr<MediaClock> video_clock;
+    std::unique_ptr<MediaClock> external_clock;
     std::condition_variable video_accurate_seek_cond;
     std::condition_variable audio_accurate_seek_cond;
 

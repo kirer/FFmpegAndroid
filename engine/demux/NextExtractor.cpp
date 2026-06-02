@@ -54,7 +54,7 @@ int NextExtractor::Open(const std::string &url, FFmpegOption &opt,
     int ret = 0;
     int streamCount = 0;
     if (!mFormatCtx || url.empty() || metadata == nullptr) {
-        RS_LOGE(EXTRACTOR_TAG, "extractor Open null, [%d, %d, %d]\n",
+        NEXT_LOGE(EXTRACTOR_TAG, "extractor Open null, [%d, %d, %d]\n",
                   !mFormatCtx, url.empty(), metadata == nullptr);
         return -1;
     }

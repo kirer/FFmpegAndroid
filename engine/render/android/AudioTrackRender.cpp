@@ -71,7 +71,7 @@ int AudioTrackRender::OpenAudio(const AudioRenderInfo &expect, AudioRenderInfo &
     } else if (actual.channels == 1) {
         channelConfig = static_cast<int>(AudioTrackChannelConfig::CHANNEL_CONFIG_MONO);
     } else {
-        RS_LOGE(AUDIO_TRACK_RENDER, "don't support channels: %d", actual.channels);
+        NEXT_LOGE(AUDIO_TRACK_RENDER, "don't support channels: %d", actual.channels);
         return -1;
     }
     int sampleRate = actual.sample_rate;

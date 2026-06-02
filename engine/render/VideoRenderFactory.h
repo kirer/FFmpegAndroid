@@ -12,7 +12,7 @@
 #include "render/opengl/OpenglVideoRender.h"
 
 #if defined(__ANDROID__)
-#include "render/android/MediacodecVideoRender.h"
+#include "render/android/MediacodecRender.h"
 #endif
 #if defined(__APPLE__)
 #include "render/metal/MetalVideoRender.h"
@@ -34,7 +34,7 @@ public:
         switch (videoRenderType) {
             case VIDEO_RENDER_MEDIACODEC:
 #if defined(__ANDROID__)
-                renderer = std::make_unique<MediaCodecVideoRender>();
+                renderer = std::make_unique<MediaCodecRender>();
 #endif
                 break;
             case VIDEO_RENDER_OPENGL:

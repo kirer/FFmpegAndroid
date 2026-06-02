@@ -26,7 +26,7 @@ static bool IsIdrPacket(AVPacket *pkt, bool is_hevc) {
                     return true;
                 }
             }
-            offset += (CommonUtil::byteToInt(nal_start) + 4);
+            offset += (ByteToInt(nal_start) + 4);
         }
     }
     return false;
