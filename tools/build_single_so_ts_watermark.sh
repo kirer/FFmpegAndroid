@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODULE_DIR="$ROOT_DIR/lib_ts_watermark"
+OUTPUT_DIR="$MODULE_DIR/src/main/jniLibs/arm64-v8a"
+OUTPUT_SO="$OUTPUT_DIR/libts-watermark.so"
+
+WORK_ROOT="${WORK_ROOT:-${TMPDIR:-/tmp}/tswm-single-build}"
+SRC_ROOT="$WORK_ROOT/src"
+PREFIX="$WORK_ROOT/prefix"
+LINK_ROOT="$WORK_ROOT/link"
+BUILD_ROOT="$LINK_ROOT/build"
+
+DEFAULT_FFMPEG_REPO="https://github.com/FFmpeg/FFmpeg.git"
+DEFAULT_X264_REPO="https://github.com/mirror/x264.git"
+if [[ -d "/tmp/tswm-src/ffmpeg/.git" ]]; then
+    DEFAULT_FFMPEG_REPO="/tmp/tswm-src/ffmpeg"
+fi
+if [[ -d "/tmp/tswm-src/x264/.git" ]]; then
+    DEFAULT_X264_REPO="/tmp/tswm-src/x264"
+fi
+
+FFMPEG_REPO="${FFMPEG_REPO:-$DEFAULT_FFMPEG_REPO}"
+FFMPEG_COMMIT="${FFMPEG_COMMIT:-ea3d24bbe3c58b171e55fe2151fc7ffaca3ab3d2}"
+X264_REPO="${X264_REPO:-$DEFAULT_X264_REPO}"
+X264_COMMIT="${X264_COMMIT:-b35605ace3ddf7c1a5d67a2eb553f034aef41d55}"
+ANDROID_API="${ANDROID_API:-21}"
+
+cpu_count() {
+    if command -v sysctl >/dev/null 2>&1; then
+        sysctl -n hw.ncpu 2>/dev/null || echo 8
+    else
+        getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8
+    fi
+}
+
+host_tag() {
+    case "$(uname -s)" in
+        Darwin) echo "darwin-x86_64" ;;
+        Linux) echo "linux-x86_64" ;;
+        *)
+            echo "Unsupported host OS: $(uname -s)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+find_ndk() {
+    if [[ -n "${ANDROID_NDK_ROOT:-}" && -d "${ANDROID_NDK_ROOT}" ]]; then
+        echo "${ANDROID_NDK_ROOT}"
+        return
+    fi
+    if [[ -n "${ANDROID_NDK_HOME:-}" && -d "${ANDROID_NDK_HOME}" ]]; then
+        echo "${ANDROID_NDK_HOME}"
+        return
+    fi
+
+    local sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Library/Android/sdk}}"
+    local ndk_root="$sdk_root/ndk"
+    if [[ ! -d "$ndk_root" ]]; then
+        echo "Android NDK not found. Set ANDROID_NDK_ROOT or install an NDK under $ndk_root." >&2
+        exit 1
+    fi
+
+    find "$ndk_root" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1
+}
+
+clone_or_update() {
+    local repo_url="$1"
+    local dest_dir="$2"
+    local ref="$3"
+
+    if [[ ! -d "$dest_dir/.git" ]]; then
+        rm -rf "$dest_dir"
+        git clone "$repo_url" "$dest_dir"
+    fi
+
+    git -C "$dest_dir" fetch --all --tags --prune
+    git -C "$dest_dir" checkout "$ref"
+}
+
+generate_link_project() {
+    mkdir -p "$LINK_ROOT"
+
+    cat >"$LINK_ROOT/ffmpeg_runner.c" <<'EOF'
+#include <jni.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define INPUT_SIZE (8 * 1024)
+
+int run(int argc, char **argv);
+
+JNIEXPORT jint JNICALL
+Java_com_dongao_lib_tswatermark_NativeFfmpegRunner_runCommand(JNIEnv *env, jclass clazz,
+                                                              jobjectArray commands) {
+    (void) clazz;
+
+    int argc = (*env)->GetArrayLength(env, commands);
+    char **argv = (char **) malloc(argc * sizeof(char *));
+    if (argv == NULL) {
+        return -1;
+    }
+
+    for (int i = 0; i < argc; i++) {
+        jstring jstr = (jstring) (*env)->GetObjectArrayElement(env, commands, i);
+        const char *temp = (*env)->GetStringUTFChars(env, jstr, 0);
+        argv[i] = (char *) malloc(INPUT_SIZE);
+        if (argv[i] == NULL) {
+            (*env)->ReleaseStringUTFChars(env, jstr, temp);
+            for (int j = 0; j < i; j++) {
+                free(argv[j]);
+            }
+            free(argv);
+            return -1;
+        }
+        strcpy(argv[i], temp);
+        (*env)->ReleaseStringUTFChars(env, jstr, temp);
+    }
+
+    int result = run(argc, argv);
+    for (int i = 0; i < argc; i++) {
+        free(argv[i]);
+    }
+    free(argv);
+    return result;
+}
+
+void progress_callback(int position, int duration, int state) {
+    (void) position;
+    (void) duration;
+    (void) state;
+}
+EOF
+
+    cat >"$LINK_ROOT/CMakeLists.txt" <<EOF
+cmake_minimum_required(VERSION 3.10)
+project(tswm_single C)
+
+set(FFMPEG_SRC "$SRC_ROOT/ffmpeg")
+set(OVERLAY_SRC "$ROOT_DIR/lib_ffmpeg/src/main/cpp/ffmpeg")
+set(PREFIX "$PREFIX")
+
+add_library(ts-watermark SHARED
+    \${OVERLAY_SRC}/cmdutils.c
+    \${OVERLAY_SRC}/ffmpeg.c
+    \${FFMPEG_SRC}/fftools/ffmpeg_demux.c
+    \${FFMPEG_SRC}/fftools/ffmpeg_filter.c
+    \${FFMPEG_SRC}/fftools/ffmpeg_hw.c
+    \${FFMPEG_SRC}/fftools/ffmpeg_mux.c
+    \${FFMPEG_SRC}/fftools/ffmpeg_mux_init.c
+    \${FFMPEG_SRC}/fftools/ffmpeg_opt.c
+    \${FFMPEG_SRC}/fftools/objpool.c
+    \${FFMPEG_SRC}/fftools/opt_common.c
+    \${FFMPEG_SRC}/fftools/sync_queue.c
+    \${FFMPEG_SRC}/fftools/thread_queue.c
+    $LINK_ROOT/ffmpeg_runner.c)
+
+target_include_directories(ts-watermark PRIVATE
+    \${FFMPEG_SRC}
+    \${FFMPEG_SRC}/fftools
+    \${OVERLAY_SRC}
+    \${PREFIX}/include)
+
+add_library(avcodec STATIC IMPORTED)
+set_target_properties(avcodec PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libavcodec.a)
+add_library(avformat STATIC IMPORTED)
+set_target_properties(avformat PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libavformat.a)
+add_library(avfilter STATIC IMPORTED)
+set_target_properties(avfilter PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libavfilter.a)
+add_library(avutil STATIC IMPORTED)
+set_target_properties(avutil PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libavutil.a)
+add_library(swscale STATIC IMPORTED)
+set_target_properties(swscale PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libswscale.a)
+add_library(swresample STATIC IMPORTED)
+set_target_properties(swresample PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libswresample.a)
+add_library(x264 STATIC IMPORTED)
+set_target_properties(x264 PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libx264.a)
+
+find_library(log-lib log)
+find_library(z-lib z)
+find_library(m-lib m)
+
+target_link_options(ts-watermark PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
+
+target_link_libraries(ts-watermark
+    avfilter
+    avformat
+    avcodec
+    swscale
+    swresample
+    avutil
+    x264
+    \${z-lib}
+    \${log-lib}
+    \${m-lib})
+EOF
+}
+
+main() {
+    local ndk_root
+    ndk_root="$(find_ndk)"
+    local host
+    host="$(host_tag)"
+
+    local toolchain_root="$ndk_root/toolchains/llvm/prebuilt/$host"
+    local sysroot="$toolchain_root/sysroot"
+    local tool_bin="$toolchain_root/bin"
+    local cc="$tool_bin/aarch64-linux-android${ANDROID_API}-clang"
+    local cxx="$tool_bin/aarch64-linux-android${ANDROID_API}-clang++"
+    local ar="$tool_bin/llvm-ar"
+    local nm="$tool_bin/llvm-nm"
+    local ranlib="$tool_bin/llvm-ranlib"
+    local strip="$tool_bin/llvm-strip"
+    local pkg_config_bin="${PKG_CONFIG_BIN:-$(command -v pkg-config)}"
+    local jobs
+    jobs="$(cpu_count)"
+
+    mkdir -p "$SRC_ROOT" "$OUTPUT_DIR"
+    rm -rf "$PREFIX"
+    mkdir -p "$PREFIX"
+
+    clone_or_update "$X264_REPO" "$SRC_ROOT/x264" "$X264_COMMIT"
+    clone_or_update "$FFMPEG_REPO" "$SRC_ROOT/ffmpeg" "$FFMPEG_COMMIT"
+
+    pushd "$SRC_ROOT/x264" >/dev/null
+    make distclean >/dev/null 2>&1 || true
+    CC="$cc" \
+    AS="$cc" \
+    AR="$ar" \
+    LD="$cc" \
+    RANLIB="$ranlib" \
+    STRIP="$strip" \
+    CFLAGS="--sysroot=$sysroot -fPIC -O3" \
+    LDFLAGS="--sysroot=$sysroot -lm" \
+    ./configure \
+        --prefix="$PREFIX" \
+        --host=aarch64-linux \
+        --enable-static \
+        --disable-cli \
+        --disable-opencl \
+        --enable-pic \
+        --bit-depth=8
+    make -j"$jobs"
+    make install
+    popd >/dev/null
+
+    pushd "$SRC_ROOT/ffmpeg" >/dev/null
+    make distclean >/dev/null 2>&1 || true
+    PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
+        --prefix="$PREFIX" \
+        --target-os=android \
+        --arch=aarch64 \
+        --cpu=armv8-a \
+        --cc="$cc" \
+        --cxx="$cxx" \
+        --ar="$ar" \
+        --nm="$nm" \
+        --ranlib="$ranlib" \
+        --strip="$strip" \
+        --sysroot="$sysroot" \
+        --enable-cross-compile \
+        --pkg-config="$pkg_config_bin" \
+        --pkg-config-flags="--static" \
+        --enable-static \
+        --disable-shared \
+        --disable-programs \
+        --disable-doc \
+        --disable-debug \
+        --enable-pic \
+        --enable-small \
+        --disable-autodetect \
+        --disable-network \
+        --disable-everything \
+        --disable-avdevice \
+        --disable-postproc \
+        --enable-zlib \
+        --enable-gpl \
+        --enable-nonfree \
+        --enable-libx264 \
+        --enable-avcodec \
+        --enable-avformat \
+        --enable-avutil \
+        --enable-avfilter \
+        --enable-swscale \
+        --enable-swresample \
+        --enable-encoder=libx264 \
+        --enable-decoder=h264,aac,png \
+        --enable-parser=h264,aac \
+        --enable-demuxer=mpegts,image2 \
+        --enable-muxer=mpegts \
+        --enable-protocol=file \
+        --enable-filter=overlay,scale,format,buffer,buffersink \
+        --extra-cflags="-Os -fPIC -I$PREFIX/include" \
+        --extra-ldflags="-L$PREFIX/lib"
+    make -j"$jobs"
+    make install
+    popd >/dev/null
+
+    generate_link_project
+    rm -rf "$BUILD_ROOT"
+    cmake -S "$LINK_ROOT" -B "$BUILD_ROOT" -G Ninja \
+        -DANDROID_ABI=arm64-v8a \
+        -DANDROID_PLATFORM="android-$ANDROID_API" \
+        -DCMAKE_TOOLCHAIN_FILE="$ndk_root/build/cmake/android.toolchain.cmake" \
+        -DANDROID_NDK="$ndk_root" \
+        -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$BUILD_ROOT"
+
+    cp "$BUILD_ROOT/libts-watermark.so" "$OUTPUT_SO"
+    "$strip" --strip-unneeded "$OUTPUT_SO"
+    stat -f '%z %N' "$OUTPUT_SO" 2>/dev/null || stat -c '%s %n' "$OUTPUT_SO"
+}
+
+main "$@"
