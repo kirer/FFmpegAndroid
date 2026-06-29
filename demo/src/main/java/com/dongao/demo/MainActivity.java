@@ -8,7 +8,6 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
@@ -18,9 +17,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.dongao.lib.ffmpeg.FFmpegCmd;
-import com.dongao.lib.ffmpeg.FFmpegUtil;
-import com.dongao.lib.ffmpeg.OnHandleListener;
+import com.dongao.lib.tswatermark.EncryptedTsWatermarker;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -47,7 +44,7 @@ public class MainActivity extends Activity {
         layout.setPadding(40, 80, 40, 40);
 
         btnSelect = new Button(this);
-        btnSelect.setText("Select Video");
+        btnSelect.setText("Select Encrypted TS");
         layout.addView(btnSelect);
 
         tvPath = new TextView(this);
@@ -60,7 +57,7 @@ public class MainActivity extends Activity {
         etCryptokey.setSingleLine(true);
         etCryptokey.setPadding(0, 10, 0, 10);
         etCryptokey.setInputType(android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
-                etCryptokey.setText("1075514326b26649");
+        etCryptokey.setText("1075514326b26649");
         layout.addView(etCryptokey);
 
         etIv = new EditText(this);
@@ -85,7 +82,7 @@ public class MainActivity extends Activity {
         btnSelect.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("video/*");
+            intent.setType("*/*");
             startActivityForResult(intent, 1);
         });
 
@@ -140,39 +137,25 @@ public class MainActivity extends Activity {
 
         String keyStr = etCryptokey.getText().toString().trim();
         String hexIv = etIv.getText().toString().trim();
-        if (!keyStr.isEmpty() && !hexIv.isEmpty()) {
-            outputPath = outBase + "_watermarked.ts";
-            tvProgress.setText("Processing...");
-            final String fOut = outputPath;
-            new Thread(() -> {
-                int ret = FFmpegCmd.watermarkEncryptedTs(videoPath, watermarkPath, fOut, keyStr, hexIv);
-                handler.post(() -> {
-                    if (ret == 0) {
-                        tvProgress.setText("Done!\n" + fOut);
-                        Toast.makeText(MainActivity.this, "Watermark success!", Toast.LENGTH_LONG).show();
-                    } else {
-                        tvProgress.setText("Failed: " + ret);
-                    }
-                });
-            }).start();
+        if (keyStr.isEmpty() || hexIv.isEmpty()) {
+            tvProgress.setText("Key and IV are required for encrypted TS.");
             return;
         }
 
-        // Normal mode
-        outputPath = outBase + ".mp4";
-        String[] cmd = FFmpegUtil.addWaterMarkImg(videoPath, watermarkPath, 1, 10, outputPath);
+        outputPath = outBase + "_encrypted.ts";
         tvProgress.setText("Processing...");
-        FFmpegCmd.execute(cmd, new OnHandleListener() {
-            @Override public void onBegin() {}
-            @Override public void onMsg(String msg) {}
-            @Override public void onProgress(int p, int d) { handler.post(() -> tvProgress.setText("Progress: " + p + "%")); }
-            @Override public void onEnd(int code, String msg) {
+        final String fOut = outputPath;
+        new Thread(() -> {
+            try {
+                EncryptedTsWatermarker.watermarkSegment(videoPath, watermarkPath, fOut, keyStr, hexIv);
                 handler.post(() -> {
-                    if (code == 0) { tvProgress.setText("Done!\n" + outputPath); Toast.makeText(MainActivity.this, "Watermark success!", Toast.LENGTH_LONG).show(); }
-                    else { tvProgress.setText("Failed: " + code); }
+                    tvProgress.setText("Done!\n" + fOut);
+                    Toast.makeText(MainActivity.this, "Watermark success!", Toast.LENGTH_LONG).show();
                 });
+            } catch (Exception e) {
+                handler.post(() -> tvProgress.setText("Failed: " + e.getMessage()));
             }
-        });
+        }).start();
     }
 
     private String generateTextWatermark(String text) {

@@ -9,6 +9,7 @@ android {
         targetSdkVersion 33
         versionCode 1
         versionName "1.0"
+        ndk { abiFilters "arm64-v8a" }
     }
     buildTypes {
         release { minifyEnabled false }
@@ -17,14 +18,8 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
-    packagingOptions {
-        pickFirst 'lib/armeabi-v7a/libffmpeg.so'
-        pickFirst 'lib/arm64-v8a/libffmpeg.so'
-        jniLibs { useLegacyPackaging = true }
-    }
 }
 
 dependencies {
-    implementation project(':lib_ffmpeg')
-    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation project(':lib_ts_watermark')
 }
