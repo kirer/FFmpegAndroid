@@ -134,12 +134,73 @@ void progress_callback(int position, int duration, int state) {
 }
 EOF
 
+    mkdir -p "$LINK_ROOT/overlay"
+    cp "$SRC_ROOT/ffmpeg/fftools/cmdutils.c" "$LINK_ROOT/overlay/cmdutils.c"
+    cp "$SRC_ROOT/ffmpeg/fftools/cmdutils.h" "$LINK_ROOT/overlay/cmdutils.h"
+    cp "$SRC_ROOT/ffmpeg/fftools/ffmpeg.c" "$LINK_ROOT/overlay/ffmpeg.c"
+
+    python3 - <<'PY' "$LINK_ROOT/overlay/cmdutils.h" "$LINK_ROOT/overlay/cmdutils.c" "$LINK_ROOT/overlay/ffmpeg.c"
+import pathlib
+import sys
+
+cmdutils_h = pathlib.Path(sys.argv[1])
+cmdutils_c = pathlib.Path(sys.argv[2])
+ffmpeg_c = pathlib.Path(sys.argv[3])
+
+text = cmdutils_h.read_text()
+marker = '#endif\n\n/**\n * program name, defined by the program for show_version().\n */'
+replacement = '#endif\n\n#include <setjmp.h>\n\nextern jmp_buf jump_buf;\n\n/**\n * program name, defined by the program for show_version().\n */'
+if marker not in text:
+    raise SystemExit('Failed to patch cmdutils.h: marker not found')
+cmdutils_h.write_text(text.replace(marker, replacement, 1))
+
+text = cmdutils_c.read_text()
+old = '    exit(ret);\n'
+new = '    longjmp(jump_buf, 1);\n'
+if old not in text:
+    raise SystemExit('Failed to patch cmdutils.c: exit marker not found')
+cmdutils_c.write_text(text.replace(old, new, 1))
+
+text = ffmpeg_c.read_text()
+marker = 'const int program_birth_year = 2000;\n'
+replacement = 'const int program_birth_year = 2000;\n\njmp_buf jump_buf;\n'
+if marker not in text:
+    raise SystemExit('Failed to patch ffmpeg.c: birth year marker not found')
+text = text.replace(marker, replacement, 1)
+
+old = 'int main(int argc, char **argv)\n'
+new = 'int run(int argc, char **argv)\n'
+if old not in text:
+    raise SystemExit('Failed to patch ffmpeg.c: main marker not found')
+text = text.replace(old, new, 1)
+
+old = '    int ret;\n    BenchmarkTimeStamps ti;\n'
+new = '    int ret;\n    BenchmarkTimeStamps ti;\n    main_return_code = 0;\n'
+if old not in text:
+    raise SystemExit('Failed to patch ffmpeg.c: ti marker not found')
+text = text.replace(old, new, 1)
+
+old = '    av_log_set_flags(AV_LOG_SKIP_REPEATED);\n    parse_loglevel(argc, argv, options);\n\n#if CONFIG_AVDEVICE\n'
+new = '    av_log_set_flags(AV_LOG_SKIP_REPEATED);\n    parse_loglevel(argc, argv, options);\n\n    if (setjmp(jump_buf)) {\n        main_return_code = 1;\n        goto end;\n    }\n\n#if CONFIG_AVDEVICE\n'
+if old not in text:
+    raise SystemExit('Failed to patch ffmpeg.c: setjmp marker not found')
+text = text.replace(old, new, 1)
+
+old = '    if (received_nb_signals)\n        exit_program(69);\n\n    exit_program(received_nb_signals ? 255 : main_return_code);\n    return main_return_code;\n}\n'
+new = '    if (received_nb_signals)\n        exit_program(69);\n\nend:\n    return main_return_code;\n}\n'
+if old not in text:
+    raise SystemExit('Failed to patch ffmpeg.c: final exit marker not found')
+text = text.replace(old, new, 1)
+
+ffmpeg_c.write_text(text)
+PY
+
     cat >"$LINK_ROOT/CMakeLists.txt" <<EOF
 cmake_minimum_required(VERSION 3.10)
 project(tswm_single C)
 
 set(FFMPEG_SRC "$SRC_ROOT/ffmpeg")
-set(OVERLAY_SRC "$ROOT_DIR/lib_ffmpeg/src/main/cpp/ffmpeg")
+set(OVERLAY_SRC "$LINK_ROOT/overlay")
 set(PREFIX "$PREFIX")
 
 add_library(ts-watermark SHARED

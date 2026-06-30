@@ -1,33 +1,29 @@
 # FFmpegAndroid
 
-### [FFmpeg官方文档](https://ffmpeg.org/)
-### [FFmpeg编译流程](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/FFmpeg_compile_shell.md)
-### [FFmpeg常用命令行](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/FFmpeg_command_line.md)
-### [FFmpeg源码分析](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/FFmpeg_sourcecode.md)
-### [JNI与NDK开发](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/JNI_develop_practice.md)
-### [音视频知识汇总](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/multimedia_knowledge.md)
-### [ijkplayer播放器架构](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/player_framework.md)
+当前仓库已经收敛成一个最小 Android demo，目标功能是：
 
-----------------------------------------------------------------------------------------------------
+- 输入单个 `AES-128` 加密的 `.ts`
+- 使用已知 `key` 和 `iv` 解密
+- 对该分片叠加水印
+- 再重新加密输出
 
-常见的流媒体传输协议包括：RTP、RTMP、RTCP、RTSP，流媒体应用协议有HLS、DASH，</br>
-WebRTC设计传输协议有SDP、ICE、NAT、STUN等，常用视频编码协议有H264、HEVC、VVC，</br>
-常用的视频封装格式有mp4，关于C/C++语言标准有C11、C20++等，书籍包括音视频编解码等。</br>
-详细列表可以查阅：[多媒体协议与书籍](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/multimedia_protocol.md)
+当前有效模块只有：
 
-音视频工作方向包括:直播、短视频、流媒体传输、视频播放器、音乐播放器、音视频算法、</br>
-流媒体后端、音视频编辑、图像处理(个人概括，具体方向不限于此)。</br>
-详情可查阅：[音视频工作方向](https://github.com/xufuji456/FFmpegAndroid/blob/master/doc/multimedia_work.md)
+- `demo`
+- `lib_ts_watermark`
 
-### 音视频基础知识:
-![preview](https://github.com/xufuji456/FFmpegAndroid/blob/master/picture/multimedia_baseline.png)
+原生库已经合并为单个：
 
-### 音视频进阶成长:
-![preview](https://github.com/xufuji456/FFmpegAndroid/blob/master/picture/multimedia_main.png)
+- `lib_ts_watermark/src/main/jniLibs/arm64-v8a/libts-watermark.so`
 
-### 音视频开源库:
-![preview](https://github.com/xufuji456/FFmpegAndroid/blob/master/picture/multimedia_library.png)
+如果需要重新生成这个单库，使用：
 
-### Joining the group to learn FFmpeg:
-![preview](https://github.com/xufuji456/FFmpegAndroid/blob/master/picture/ffmpeg_group.png)
+```bash
+bash tools/build_single_so_ts_watermark.sh
+```
 
+常用验证命令：
+
+```bash
+bash gradlew :lib_ts_watermark:testDebugUnitTest :demo:assembleDebug
+```
