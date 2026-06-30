@@ -4,57 +4,53 @@ import java.io.File;
 
 public final class EncryptedTsWatermarker {
 
+    static {
+        System.loadLibrary("ts-watermark");
+    }
+
     private EncryptedTsWatermarker() {
     }
 
     public static void watermarkSegment(String encryptedTsPath, String watermarkPath,
-                                        String outputPath, String key, String iv) throws Exception {
-        watermarkSegment(new File(encryptedTsPath), new File(watermarkPath), new File(outputPath), key, iv);
+                                        String outputPath, String key, String iv) {
+        nativeWatermarkSegment(
+                requireText(encryptedTsPath, "encryptedTsPath"),
+                requireText(watermarkPath, "watermarkPath"),
+                requireText(outputPath, "outputPath"),
+                requireText(key, "key"),
+                requireText(iv, "iv"));
     }
 
     public static void watermarkSegment(File encryptedTs, File watermarkFile,
-                                        File outputFile, String key, String iv) throws Exception {
-        validateInput(encryptedTs, "encrypted ts");
-        validateInput(watermarkFile, "watermark");
-
-        File parent = outputFile.getParentFile();
-        if (parent == null) {
-            throw new IllegalArgumentException("output file must have a parent directory");
+                                        File outputFile, String key, String iv) {
+        if (encryptedTs == null) {
+            throw new IllegalArgumentException("encryptedTs is null");
         }
-        if (!parent.exists() && !parent.mkdirs()) {
-            throw new IllegalStateException("failed to create output directory: " + parent.getAbsolutePath());
+        if (watermarkFile == null) {
+            throw new IllegalArgumentException("watermarkFile is null");
         }
-
-        File workspace = new File(parent, ".ts-watermark-" + System.currentTimeMillis());
-        if (!workspace.mkdirs() && !workspace.isDirectory()) {
-            throw new IllegalStateException("failed to create temp workspace: " + workspace.getAbsolutePath());
+        if (outputFile == null) {
+            throw new IllegalArgumentException("outputFile is null");
         }
-
-        try {
-            File plainInput = new File(workspace, "input_plain.ts");
-            File plainOutput = new File(workspace, "output_plain.ts");
-
-            Aes128SegmentCrypto.decrypt(encryptedTs, plainInput, key, iv);
-            SegmentMediaInfo mediaInfo = SegmentMediaInfoReader.read(plainInput);
-            WatermarkEncodingProfile encodingProfile = TargetBitrateCalculator.createProfile(mediaInfo);
-            String[] command = FfmpegCommandBuilder.buildWatermarkTsCommand(
-                    plainInput.getAbsolutePath(),
-                    watermarkFile.getAbsolutePath(),
-                    plainOutput.getAbsolutePath(),
-                    encodingProfile);
-            int result = NativeFfmpegRunner.runCommand(command);
-            if (result != 0) {
-                throw new IllegalStateException("ffmpeg watermark failed with exit code " + result);
-            }
-            Aes128SegmentCrypto.encrypt(plainOutput, outputFile, key, iv);
-        } finally {
-            Aes128SegmentCrypto.deleteRecursively(workspace);
-        }
+        watermarkSegment(
+                encryptedTs.getAbsolutePath(),
+                watermarkFile.getAbsolutePath(),
+                outputFile.getAbsolutePath(),
+                key,
+                iv);
     }
 
-    private static void validateInput(File file, String label) {
-        if (file == null || !file.isFile()) {
-            throw new IllegalArgumentException(label + " file does not exist: " + file);
+    private static String requireText(String value, String label) {
+        if (value == null) {
+            throw new IllegalArgumentException(label + " is null");
         }
+        String normalized = value.trim();
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException(label + " is empty");
+        }
+        return normalized;
     }
+
+    private static native void nativeWatermarkSegment(String encryptedTsPath, String watermarkPath,
+                                                      String outputPath, String key, String iv);
 }

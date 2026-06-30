@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODULE_DIR="$ROOT_DIR/lib_ts_watermark"
 OUTPUT_DIR="$MODULE_DIR/src/main/jniLibs/arm64-v8a"
 OUTPUT_SO="$OUTPUT_DIR/libts-watermark.so"
+NATIVE_SOURCE="$MODULE_DIR/native/ts_watermark_native.c"
 
 WORK_ROOT="${WORK_ROOT:-${TMPDIR:-/tmp}/tswm-single-build}"
 SRC_ROOT="$WORK_ROOT/src"
@@ -26,6 +27,7 @@ FFMPEG_COMMIT="${FFMPEG_COMMIT:-ea3d24bbe3c58b171e55fe2151fc7ffaca3ab3d2}"
 X264_REPO="${X264_REPO:-$DEFAULT_X264_REPO}"
 X264_COMMIT="${X264_COMMIT:-b35605ace3ddf7c1a5d67a2eb553f034aef41d55}"
 ANDROID_API="${ANDROID_API:-21}"
+SKIP_DEPENDENCY_BUILD="${SKIP_DEPENDENCY_BUILD:-0}"
 
 cpu_count() {
     if command -v sysctl >/dev/null 2>&1; then
@@ -83,57 +85,6 @@ clone_or_update() {
 generate_link_project() {
     mkdir -p "$LINK_ROOT"
 
-    cat >"$LINK_ROOT/ffmpeg_runner.c" <<'EOF'
-#include <jni.h>
-#include <stdlib.h>
-#include <string.h>
-
-#define INPUT_SIZE (8 * 1024)
-
-int run(int argc, char **argv);
-
-JNIEXPORT jint JNICALL
-Java_com_dongao_lib_tswatermark_NativeFfmpegRunner_runCommand(JNIEnv *env, jclass clazz,
-                                                              jobjectArray commands) {
-    (void) clazz;
-
-    int argc = (*env)->GetArrayLength(env, commands);
-    char **argv = (char **) malloc(argc * sizeof(char *));
-    if (argv == NULL) {
-        return -1;
-    }
-
-    for (int i = 0; i < argc; i++) {
-        jstring jstr = (jstring) (*env)->GetObjectArrayElement(env, commands, i);
-        const char *temp = (*env)->GetStringUTFChars(env, jstr, 0);
-        argv[i] = (char *) malloc(INPUT_SIZE);
-        if (argv[i] == NULL) {
-            (*env)->ReleaseStringUTFChars(env, jstr, temp);
-            for (int j = 0; j < i; j++) {
-                free(argv[j]);
-            }
-            free(argv);
-            return -1;
-        }
-        strcpy(argv[i], temp);
-        (*env)->ReleaseStringUTFChars(env, jstr, temp);
-    }
-
-    int result = run(argc, argv);
-    for (int i = 0; i < argc; i++) {
-        free(argv[i]);
-    }
-    free(argv);
-    return result;
-}
-
-void progress_callback(int position, int duration, int state) {
-    (void) position;
-    (void) duration;
-    (void) state;
-}
-EOF
-
     mkdir -p "$LINK_ROOT/overlay"
     cp "$SRC_ROOT/ffmpeg/fftools/cmdutils.c" "$LINK_ROOT/overlay/cmdutils.c"
     cp "$SRC_ROOT/ffmpeg/fftools/cmdutils.h" "$LINK_ROOT/overlay/cmdutils.h"
@@ -163,7 +114,7 @@ cmdutils_c.write_text(text.replace(old, new, 1))
 
 text = ffmpeg_c.read_text()
 marker = 'const int program_birth_year = 2000;\n'
-replacement = 'const int program_birth_year = 2000;\n\njmp_buf jump_buf;\n'
+replacement = 'const int program_birth_year = 2000;\n\n#include <setjmp.h>\n\njmp_buf jump_buf;\n'
 if marker not in text:
     raise SystemExit('Failed to patch ffmpeg.c: birth year marker not found')
 text = text.replace(marker, replacement, 1)
@@ -186,10 +137,10 @@ if old not in text:
     raise SystemExit('Failed to patch ffmpeg.c: setjmp marker not found')
 text = text.replace(old, new, 1)
 
-old = '    if (received_nb_signals)\n        exit_program(69);\n\n    exit_program(received_nb_signals ? 255 : main_return_code);\n    return main_return_code;\n}\n'
-new = '    if (received_nb_signals)\n        exit_program(69);\n\nend:\n    return main_return_code;\n}\n'
+old = '    exit_program(received_nb_signals ? 255 : main_return_code);\n    return main_return_code;\n}\n'
+new = 'end:\n    return main_return_code;\n}\n'
 if old not in text:
-    raise SystemExit('Failed to patch ffmpeg.c: final exit marker not found')
+    raise SystemExit('Failed to patch ffmpeg.c: final return marker not found')
 text = text.replace(old, new, 1)
 
 ffmpeg_c.write_text(text)
@@ -202,8 +153,10 @@ project(tswm_single C)
 set(FFMPEG_SRC "$SRC_ROOT/ffmpeg")
 set(OVERLAY_SRC "$LINK_ROOT/overlay")
 set(PREFIX "$PREFIX")
+set(NATIVE_SRC "$NATIVE_SOURCE")
 
 add_library(ts-watermark SHARED
+    \${NATIVE_SRC}
     \${OVERLAY_SRC}/cmdutils.c
     \${OVERLAY_SRC}/ffmpeg.c
     \${FFMPEG_SRC}/fftools/ffmpeg_demux.c
@@ -215,8 +168,7 @@ add_library(ts-watermark SHARED
     \${FFMPEG_SRC}/fftools/objpool.c
     \${FFMPEG_SRC}/fftools/opt_common.c
     \${FFMPEG_SRC}/fftools/sync_queue.c
-    \${FFMPEG_SRC}/fftools/thread_queue.c
-    $LINK_ROOT/ffmpeg_runner.c)
+    \${FFMPEG_SRC}/fftools/thread_queue.c)
 
 target_include_directories(ts-watermark PRIVATE
     \${FFMPEG_SRC}
@@ -234,8 +186,6 @@ add_library(avutil STATIC IMPORTED)
 set_target_properties(avutil PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libavutil.a)
 add_library(swscale STATIC IMPORTED)
 set_target_properties(swscale PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libswscale.a)
-add_library(swresample STATIC IMPORTED)
-set_target_properties(swresample PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libswresample.a)
 add_library(x264 STATIC IMPORTED)
 set_target_properties(x264 PROPERTIES IMPORTED_LOCATION \${PREFIX}/lib/libx264.a)
 
@@ -243,14 +193,24 @@ find_library(log-lib log)
 find_library(z-lib z)
 find_library(m-lib m)
 
-target_link_options(ts-watermark PRIVATE -Wl,--gc-sections -Wl,--exclude-libs,ALL)
+target_compile_options(ts-watermark PRIVATE
+    -Os
+    -ffunction-sections
+    -fdata-sections
+    -fvisibility=hidden
+    -fno-unwind-tables
+    -fno-asynchronous-unwind-tables)
+
+target_link_options(ts-watermark PRIVATE
+    -Wl,--gc-sections
+    -Wl,--exclude-libs,ALL
+    -Wl,--build-id=none)
 
 target_link_libraries(ts-watermark
     avfilter
     avformat
     avcodec
     swscale
-    swresample
     avutil
     x264
     \${z-lib}
@@ -278,86 +238,113 @@ main() {
     local jobs
     jobs="$(cpu_count)"
 
+    if [[ ! -f "$NATIVE_SOURCE" ]]; then
+        echo "Native source not found: $NATIVE_SOURCE" >&2
+        exit 1
+    fi
+
     mkdir -p "$SRC_ROOT" "$OUTPUT_DIR"
-    rm -rf "$PREFIX"
-    mkdir -p "$PREFIX"
+    if [[ "$SKIP_DEPENDENCY_BUILD" != "1" ]]; then
+        rm -rf "$PREFIX"
+        mkdir -p "$PREFIX"
 
-    clone_or_update "$X264_REPO" "$SRC_ROOT/x264" "$X264_COMMIT"
-    clone_or_update "$FFMPEG_REPO" "$SRC_ROOT/ffmpeg" "$FFMPEG_COMMIT"
+        clone_or_update "$X264_REPO" "$SRC_ROOT/x264" "$X264_COMMIT"
+        clone_or_update "$FFMPEG_REPO" "$SRC_ROOT/ffmpeg" "$FFMPEG_COMMIT"
 
-    pushd "$SRC_ROOT/x264" >/dev/null
-    make distclean >/dev/null 2>&1 || true
-    CC="$cc" \
-    AS="$cc" \
-    AR="$ar" \
-    LD="$cc" \
-    RANLIB="$ranlib" \
-    STRIP="$strip" \
-    CFLAGS="--sysroot=$sysroot -fPIC -O3" \
-    LDFLAGS="--sysroot=$sysroot -lm" \
-    ./configure \
-        --prefix="$PREFIX" \
-        --host=aarch64-linux \
-        --enable-static \
-        --disable-cli \
-        --disable-opencl \
-        --enable-pic \
-        --bit-depth=8
-    make -j"$jobs"
-    make install
-    popd >/dev/null
+        pushd "$SRC_ROOT/x264" >/dev/null
+        make distclean >/dev/null 2>&1 || true
+        CC="$cc" \
+        AS="$cc" \
+        AR="$ar" \
+        LD="$cc" \
+        RANLIB="$ranlib" \
+        STRIP="$strip" \
+        CFLAGS="--sysroot=$sysroot -fPIC -Oz -ffunction-sections -fdata-sections -fvisibility=hidden -fomit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables" \
+        LDFLAGS="--sysroot=$sysroot -Wl,--gc-sections -lm" \
+        ./configure \
+            --prefix="$PREFIX" \
+            --host=aarch64-linux \
+            --enable-static \
+            --disable-cli \
+            --disable-opencl \
+            --disable-thread \
+            --disable-interlaced \
+            --disable-lavf \
+            --disable-swscale \
+            --enable-strip \
+            --enable-pic \
+            --bit-depth=8 \
+            --chroma-format=420
+        make -j"$jobs"
+        make install
+        popd >/dev/null
 
-    pushd "$SRC_ROOT/ffmpeg" >/dev/null
-    make distclean >/dev/null 2>&1 || true
-    PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
-        --prefix="$PREFIX" \
-        --target-os=android \
-        --arch=aarch64 \
-        --cpu=armv8-a \
-        --cc="$cc" \
-        --cxx="$cxx" \
-        --ar="$ar" \
-        --nm="$nm" \
-        --ranlib="$ranlib" \
-        --strip="$strip" \
-        --sysroot="$sysroot" \
-        --enable-cross-compile \
-        --pkg-config="$pkg_config_bin" \
-        --pkg-config-flags="--static" \
-        --enable-static \
-        --disable-shared \
-        --disable-programs \
-        --disable-doc \
-        --disable-debug \
-        --enable-pic \
-        --enable-small \
-        --disable-autodetect \
-        --disable-network \
-        --disable-everything \
-        --disable-avdevice \
-        --disable-postproc \
-        --enable-zlib \
-        --enable-gpl \
-        --enable-nonfree \
-        --enable-libx264 \
-        --enable-avcodec \
-        --enable-avformat \
-        --enable-avutil \
-        --enable-avfilter \
-        --enable-swscale \
-        --enable-swresample \
-        --enable-encoder=libx264 \
-        --enable-decoder=h264,aac,png \
-        --enable-parser=h264,aac \
-        --enable-demuxer=mpegts,image2 \
-        --enable-muxer=mpegts \
-        --enable-protocol=file \
-        --enable-filter=overlay,scale,format,buffer,buffersink \
-        --extra-cflags="-Os -fPIC -I$PREFIX/include" \
-        --extra-ldflags="-L$PREFIX/lib"
-    make -j"$jobs"
-    make install
-    popd >/dev/null
+        pushd "$SRC_ROOT/ffmpeg" >/dev/null
+        make distclean >/dev/null 2>&1 || true
+        PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" ./configure \
+            --prefix="$PREFIX" \
+            --target-os=android \
+            --arch=aarch64 \
+            --cpu=armv8-a \
+            --cc="$cc" \
+            --cxx="$cxx" \
+            --ar="$ar" \
+            --nm="$nm" \
+            --ranlib="$ranlib" \
+            --strip="$strip" \
+            --sysroot="$sysroot" \
+            --enable-cross-compile \
+            --pkg-config="$pkg_config_bin" \
+            --pkg-config-flags="--static" \
+            --enable-static \
+            --disable-shared \
+            --disable-programs \
+            --disable-doc \
+            --disable-debug \
+            --disable-runtime-cpudetect \
+            --enable-pic \
+            --enable-small \
+            --enable-hardcoded-tables \
+            --disable-swscale-alpha \
+            --disable-autodetect \
+            --disable-network \
+            --disable-everything \
+            --disable-avdevice \
+            --disable-postproc \
+            --disable-swresample \
+            --disable-bsfs \
+            --disable-parser=ac3 \
+            --disable-bsf=aac_adtstoasc \
+            --disable-bsf=hevc_mp4toannexb \
+            --disable-muxer=adts \
+            --disable-muxer=latm \
+            --enable-zlib \
+            --enable-gpl \
+            --enable-nonfree \
+            --enable-libx264 \
+            --enable-avcodec \
+            --enable-avformat \
+            --enable-avutil \
+            --enable-avfilter \
+            --enable-swscale \
+            --enable-encoder=libx264 \
+            --enable-decoder=h264,png \
+            --enable-parser=h264 \
+            --enable-demuxer=mpegts,image2 \
+            --enable-muxer=mpegts \
+            --enable-protocol=file \
+            --enable-filter=overlay,scale,format,buffer,buffersink \
+            --extra-cflags="-Oz -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden -fomit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables -I$PREFIX/include" \
+            --extra-ldflags="-Wl,--gc-sections -L$PREFIX/lib"
+        make -j"$jobs"
+        make install
+        popd >/dev/null
+    fi
+
+    if [[ ! -f "$PREFIX/lib/libavformat.a" || ! -f "$PREFIX/lib/libx264.a" || ! -f "$SRC_ROOT/ffmpeg/fftools/ffmpeg.c" ]]; then
+        echo "Missing FFmpeg/x264 artifacts under $WORK_ROOT. Run without SKIP_DEPENDENCY_BUILD=1 first." >&2
+        exit 1
+    fi
 
     generate_link_project
     rm -rf "$BUILD_ROOT"
