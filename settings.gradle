@@ -1,7 +1,2 @@
-include ':app'
-include ':Live'
-include ':CameraFilter'
-include ':NextPlayer'
 include ':demo'
-include ':lib_ffmpeg'
 include ':lib_ts_watermark'
