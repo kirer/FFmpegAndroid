@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
+import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -24,6 +25,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 
 public class MainActivity extends Activity {
+
+    private static final String TAG = "TsWatermarkDemo";
 
     private TextView tvPath, tvProgress;
     private Button btnSelect, btnWatermark;
@@ -152,10 +155,29 @@ public class MainActivity extends Activity {
                     tvProgress.setText("Done!\n" + fOut);
                     Toast.makeText(MainActivity.this, "Watermark success!", Toast.LENGTH_LONG).show();
                 });
-            } catch (Exception e) {
-                handler.post(() -> tvProgress.setText("Failed: " + e.getMessage()));
+            } catch (Throwable t) {
+                Log.e(TAG, "加水印失败", t);
+                String detail = buildErrorMessage(t);
+                handler.post(() -> tvProgress.setText(detail));
             }
         }).start();
+    }
+
+    private String buildErrorMessage(Throwable throwable) {
+        StringBuilder builder = new StringBuilder("处理失败，请查看 logcat 中的 TsWatermark / TsWatermarkDemo 日志");
+        Throwable current = throwable;
+        int depth = 0;
+        while (current != null && depth < 5) {
+            String message = current.getMessage();
+            builder.append("\n\n原因").append(depth + 1).append("：")
+                    .append(current.getClass().getSimpleName());
+            if (message != null && !message.trim().isEmpty()) {
+                builder.append("\n").append(message.trim());
+            }
+            current = current.getCause();
+            depth++;
+        }
+        return builder.toString();
     }
 
     private String generateTextWatermark(String text) {

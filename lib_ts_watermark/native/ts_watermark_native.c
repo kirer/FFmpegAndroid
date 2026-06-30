@@ -1,9 +1,11 @@
 #include <jni.h>
 
+#include <android/log.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,6 +21,8 @@
 #define MIN_BUFFER_SIZE 256000
 #define MIN_MUX_OVERHEAD 24000
 #define DEFAULT_AUDIO_BITRATE 128000
+#define LOG_TAG "TsWatermark"
+#define ERROR_BUFFER_SIZE 2048
 
 typedef struct SegmentMediaInfo {
     int64_t duration_ms;
@@ -37,6 +41,136 @@ typedef struct WatermarkEncodingProfile {
 } WatermarkEncodingProfile;
 
 int run(int argc, char **argv);
+
+static char g_last_ffmpeg_log[8192];
+static size_t g_last_ffmpeg_log_length = 0;
+
+static int64_t parse_file_size(const char *path);
+
+static void log_info(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    __android_log_vprint(ANDROID_LOG_INFO, LOG_TAG, format, args);
+    va_end(args);
+}
+
+static void log_error(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    __android_log_vprint(ANDROID_LOG_ERROR, LOG_TAG, format, args);
+    va_end(args);
+}
+
+static void reset_ffmpeg_log_buffer(void)
+{
+    g_last_ffmpeg_log[0] = '\0';
+    g_last_ffmpeg_log_length = 0;
+}
+
+static void append_ffmpeg_log_line(const char *message)
+{
+    size_t message_length;
+    size_t writable;
+
+    if (message == NULL || message[0] == '\0') {
+        return;
+    }
+
+    message_length = strlen(message);
+    if (message_length >= sizeof(g_last_ffmpeg_log)) {
+        message += message_length - (sizeof(g_last_ffmpeg_log) - 1);
+        message_length = sizeof(g_last_ffmpeg_log) - 1;
+    }
+
+    if (g_last_ffmpeg_log_length + message_length >= sizeof(g_last_ffmpeg_log)) {
+        size_t keep = sizeof(g_last_ffmpeg_log) - 1 - message_length;
+        memmove(g_last_ffmpeg_log, g_last_ffmpeg_log + g_last_ffmpeg_log_length - keep, keep);
+        g_last_ffmpeg_log_length = keep;
+        g_last_ffmpeg_log[g_last_ffmpeg_log_length] = '\0';
+    }
+
+    writable = sizeof(g_last_ffmpeg_log) - 1 - g_last_ffmpeg_log_length;
+    if (message_length > writable) {
+        message_length = writable;
+    }
+
+    memcpy(g_last_ffmpeg_log + g_last_ffmpeg_log_length, message, message_length);
+    g_last_ffmpeg_log_length += message_length;
+    g_last_ffmpeg_log[g_last_ffmpeg_log_length] = '\0';
+}
+
+static void ffmpeg_android_log_callback(void *ptr, int level, const char *fmt, va_list vl)
+{
+    char line[1024];
+    int priority = ANDROID_LOG_INFO;
+
+    (void) ptr;
+
+    vsnprintf(line, sizeof(line), fmt, vl);
+
+    if (level <= AV_LOG_ERROR) {
+        priority = ANDROID_LOG_ERROR;
+    } else if (level <= AV_LOG_WARNING) {
+        priority = ANDROID_LOG_WARN;
+    } else if (level <= AV_LOG_INFO) {
+        priority = ANDROID_LOG_INFO;
+    } else {
+        priority = ANDROID_LOG_DEBUG;
+    }
+
+    __android_log_write(priority, LOG_TAG, line);
+    if (level <= AV_LOG_WARNING) {
+        append_ffmpeg_log_line(line);
+    }
+}
+
+static void append_debug_hint(char *error, size_t error_size, const char *prefix)
+{
+    size_t current_length;
+    size_t reserved;
+    size_t tail_length;
+
+    if (error == NULL || error_size == 0 || g_last_ffmpeg_log_length == 0) {
+        return;
+    }
+
+    if (error[0] == '\0') {
+        snprintf(error, error_size, "%s%s", prefix, g_last_ffmpeg_log);
+        return;
+    }
+
+    current_length = strlen(error);
+    if (current_length >= error_size - 1) {
+        return;
+    }
+
+    av_strlcat(error, prefix, error_size);
+    current_length = strlen(error);
+    if (current_length >= error_size - 1) {
+        return;
+    }
+
+    reserved = error_size - current_length - 1;
+    if (g_last_ffmpeg_log_length <= reserved) {
+        av_strlcat(error, g_last_ffmpeg_log, error_size);
+        return;
+    }
+
+    tail_length = reserved;
+    av_strlcat(error, g_last_ffmpeg_log + g_last_ffmpeg_log_length - tail_length, error_size);
+}
+
+static void log_file_size(const char *label, const char *path)
+{
+    int64_t size = parse_file_size(path);
+    if (size > 0) {
+        log_info("%s大小: %lld 字节, 路径: %s", label, (long long) size, path);
+    } else {
+        log_info("%s大小暂时无法获取, 路径: %s", label, path ? path : "(null)");
+    }
+}
 
 static void set_error(char *buffer, size_t buffer_size, const char *message)
 {
@@ -178,20 +312,20 @@ static int read_file(const char *path, uint8_t **data, size_t *size, char *error
 
     file = fopen(path, "rb");
     if (file == NULL) {
-        snprintf(error, error_size, "failed to open %s: %s", path, strerror(errno));
+        snprintf(error, error_size, "打开文件失败: %s, 原因: %s", path, strerror(errno));
         return -1;
     }
 
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
-        snprintf(error, error_size, "failed to seek %s", path);
+        snprintf(error, error_size, "定位文件失败: %s", path);
         return -1;
     }
 
     file_size = ftell(file);
     if (file_size < 0) {
         fclose(file);
-        snprintf(error, error_size, "failed to read size for %s", path);
+        snprintf(error, error_size, "读取文件大小失败: %s", path);
         return -1;
     }
     rewind(file);
@@ -207,7 +341,7 @@ static int read_file(const char *path, uint8_t **data, size_t *size, char *error
     fclose(file);
     if (read_size != (size_t)file_size) {
         av_free(buffer);
-        snprintf(error, error_size, "failed to read %s", path);
+        snprintf(error, error_size, "读取文件内容失败: %s", path);
         return -1;
     }
 
@@ -222,13 +356,13 @@ static int write_file(const char *path, const uint8_t *data, size_t size, char *
     FILE *file = fopen(path, "wb");
     size_t written;
     if (file == NULL) {
-        snprintf(error, error_size, "failed to open %s: %s", path, strerror(errno));
+        snprintf(error, error_size, "打开输出文件失败: %s, 原因: %s", path, strerror(errno));
         return -1;
     }
     written = fwrite(data, 1, size, file);
     fclose(file);
     if (written != size) {
-        snprintf(error, error_size, "failed to write %s", path);
+        snprintf(error, error_size, "写入文件失败: %s", path);
         return -1;
     }
     return 0;
@@ -251,17 +385,17 @@ static int decrypt_file_aes128(const char *input_path, const char *output_path,
         goto cleanup;
     }
     if (encrypted_size == 0 || (encrypted_size % AES_BLOCK_SIZE) != 0) {
-        set_error(error, error_size, "encrypted ts length must be a non-zero multiple of 16");
+        set_error(error, error_size, "加密 ts 文件长度非法，必须是 16 的非零整数倍");
         goto cleanup;
     }
 
     aes = av_aes_alloc();
     if (aes == NULL) {
-        set_error(error, error_size, "failed to allocate AES context");
+        set_error(error, error_size, "分配 AES 解密上下文失败");
         goto cleanup;
     }
     if (av_aes_init(aes, key, 128, 1) < 0) {
-        set_error(error, error_size, "failed to initialize AES decrypt context");
+        set_error(error, error_size, "初始化 AES 解密上下文失败");
         goto cleanup;
     }
 
@@ -276,12 +410,12 @@ static int decrypt_file_aes128(const char *input_path, const char *output_path,
 
     padding = plain[encrypted_size - 1];
     if (padding == 0 || padding > AES_BLOCK_SIZE) {
-        set_error(error, error_size, "invalid PKCS7 padding");
+        set_error(error, error_size, "解密后 PKCS7 padding 非法");
         goto cleanup;
     }
     for (size_t i = 0; i < padding; ++i) {
         if (plain[encrypted_size - 1 - i] != padding) {
-            set_error(error, error_size, "invalid PKCS7 padding");
+            set_error(error, error_size, "解密后 PKCS7 padding 校验失败");
             goto cleanup;
         }
     }
@@ -327,7 +461,7 @@ static int encrypt_file_aes128(const char *input_path, const char *output_path,
     padded = av_malloc(padded_size);
     encrypted = av_malloc(padded_size);
     if (padded == NULL || encrypted == NULL) {
-        set_error(error, error_size, "out of memory");
+        set_error(error, error_size, "内存不足");
         goto cleanup;
     }
 
@@ -336,11 +470,11 @@ static int encrypt_file_aes128(const char *input_path, const char *output_path,
 
     aes = av_aes_alloc();
     if (aes == NULL) {
-        set_error(error, error_size, "failed to allocate AES context");
+        set_error(error, error_size, "分配 AES 加密上下文失败");
         goto cleanup;
     }
     if (av_aes_init(aes, key, 128, 0) < 0) {
-        set_error(error, error_size, "failed to initialize AES encrypt context");
+        set_error(error, error_size, "初始化 AES 加密上下文失败");
         goto cleanup;
     }
 
@@ -401,7 +535,8 @@ static int read_segment_media_info(const char *input_path, SegmentMediaInfo *med
     if (result < 0) {
         char ff_error[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(result, ff_error, sizeof(ff_error));
-        snprintf(error, error_size, "failed to open decrypted ts: %s", ff_error);
+        snprintf(error, error_size, "打开解密后的 ts 失败: %s", ff_error);
+        append_debug_hint(error, error_size, "；FFmpeg日志: ");
         return -1;
     }
 
@@ -409,7 +544,8 @@ static int read_segment_media_info(const char *input_path, SegmentMediaInfo *med
     if (result < 0) {
         char ff_error[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(result, ff_error, sizeof(ff_error));
-        snprintf(error, error_size, "failed to probe ts stream info: %s", ff_error);
+        snprintf(error, error_size, "探测 ts 音视频信息失败: %s", ff_error);
+        append_debug_hint(error, error_size, "；FFmpeg日志: ");
         avformat_close_input(&format_context);
         return -1;
     }
@@ -501,6 +637,37 @@ static char *dup_printf_int(int value)
     return av_strdup(buffer);
 }
 
+static void log_ffmpeg_command(int argc, char **argv)
+{
+    char command[2048];
+    size_t used = 0;
+
+    command[0] = '\0';
+    for (int i = 0; i < argc; ++i) {
+        const char *arg = argv[i] ? argv[i] : "(null)";
+        int written;
+
+        if (used >= sizeof(command) - 1) {
+            break;
+        }
+        written = snprintf(command + used, sizeof(command) - used, "%s%s",
+                i == 0 ? "" : " ", arg);
+        if (written < 0) {
+            break;
+        }
+        if ((size_t) written >= sizeof(command) - used) {
+            used = sizeof(command) - 1;
+            break;
+        }
+        used += (size_t) written;
+    }
+
+    if (used >= sizeof(command) - 1) {
+        av_strlcat(command, " ...", sizeof(command));
+    }
+    log_info("本次 FFmpeg 命令: %s", command);
+}
+
 static void free_args(char **argv, int argc)
 {
     if (argv == NULL) {
@@ -516,16 +683,19 @@ static int build_ffmpeg_args(const char *input_path, const char *watermark_path,
                              const WatermarkEncodingProfile *profile,
                              int *argc_out, char ***argv_out, char *error, size_t error_size)
 {
-    int argc = profile->bitrate_controlled ? 31 : 25;
+    int argc = profile->bitrate_controlled ? 35 : 29;
     char **argv = av_calloc((size_t)argc, sizeof(char *));
     int i = 0;
 
     if (argv == NULL) {
-        set_error(error, error_size, "out of memory");
+        set_error(error, error_size, "内存不足");
         return -1;
     }
 
     argv[i++] = av_strdup("ffmpeg");
+    argv[i++] = av_strdup("-hide_banner");
+    argv[i++] = av_strdup("-loglevel");
+    argv[i++] = av_strdup("info");
     argv[i++] = av_strdup("-i");
     argv[i++] = av_strdup(input_path);
     argv[i++] = av_strdup("-i");
@@ -567,7 +737,7 @@ static int build_ffmpeg_args(const char *input_path, const char *watermark_path,
     for (int j = 0; j < argc; ++j) {
         if (argv[j] == NULL) {
             free_args(argv, argc);
-            set_error(error, error_size, "out of memory");
+            set_error(error, error_size, "构建 FFmpeg 参数失败，内存不足");
             return -1;
         }
     }
@@ -583,13 +753,13 @@ static int ensure_directory_recursive(const char *directory, char *error, size_t
     size_t length;
 
     if (directory == NULL || directory[0] == '\0') {
-        set_error(error, error_size, "output file must have a parent directory");
+        set_error(error, error_size, "输出文件必须有父目录");
         return -1;
     }
 
     path = av_strdup(directory);
     if (path == NULL) {
-        set_error(error, error_size, "out of memory");
+        set_error(error, error_size, "内存不足");
         return -1;
     }
 
@@ -602,7 +772,7 @@ static int ensure_directory_recursive(const char *directory, char *error, size_t
         if (*cursor == '/') {
             *cursor = '\0';
             if (mkdir(path, 0777) != 0 && errno != EEXIST) {
-                snprintf(error, error_size, "failed to create output directory: %s", path);
+                snprintf(error, error_size, "创建输出目录失败: %s", path);
                 av_free(path);
                 return -1;
             }
@@ -611,7 +781,7 @@ static int ensure_directory_recursive(const char *directory, char *error, size_t
     }
 
     if (mkdir(path, 0777) != 0 && errno != EEXIST) {
-        snprintf(error, error_size, "failed to create output directory: %s", path);
+        snprintf(error, error_size, "创建输出目录失败: %s", path);
         av_free(path);
         return -1;
     }
@@ -640,11 +810,11 @@ static int create_workspace(const char *parent_dir, char **workspace_out, char *
 {
     char *pattern = av_asprintf("%s/.ts-watermark-XXXXXX", parent_dir);
     if (pattern == NULL) {
-        set_error(error, error_size, "out of memory");
+        set_error(error, error_size, "内存不足");
         return -1;
     }
     if (mkdtemp(pattern) == NULL) {
-        snprintf(error, error_size, "failed to create temp workspace: %s", strerror(errno));
+        snprintf(error, error_size, "创建临时工作目录失败: %s", strerror(errno));
         av_free(pattern);
         return -1;
     }
@@ -692,12 +862,21 @@ static int watermark_segment_native(const char *encrypted_ts_path, const char *w
     int result = -1;
     struct stat st;
 
+    log_info("开始处理加密 TS，输入: %s", encrypted_ts_path ? encrypted_ts_path : "(null)");
+    reset_ffmpeg_log_buffer();
+    av_log_set_level(AV_LOG_INFO);
+    av_log_set_callback(ffmpeg_android_log_callback);
+
     if (encrypted_ts_path == NULL || stat(encrypted_ts_path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        snprintf(error, error_size, "encrypted ts file does not exist: %s", encrypted_ts_path);
+        snprintf(error, error_size, "加密 ts 文件不存在: %s", encrypted_ts_path);
         goto cleanup;
     }
     if (watermark_path == NULL || stat(watermark_path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        snprintf(error, error_size, "watermark file does not exist: %s", watermark_path);
+        snprintf(error, error_size, "水印文件不存在: %s", watermark_path);
+        goto cleanup;
+    }
+    if (output_path == NULL || output_path[0] == '\0') {
+        set_error(error, error_size, "输出路径不能为空");
         goto cleanup;
     }
 
@@ -706,9 +885,12 @@ static int watermark_segment_native(const char *encrypted_ts_path, const char *w
         goto cleanup;
     }
 
+    log_file_size("输入加密TS", encrypted_ts_path);
+    log_file_size("输入水印图", watermark_path);
+
     parent_dir = parent_directory_of(output_path);
     if (parent_dir == NULL) {
-        set_error(error, error_size, "output file must have a parent directory");
+        set_error(error, error_size, "输出文件必须有父目录");
         goto cleanup;
     }
     if (ensure_directory_recursive(parent_dir, error, error_size) != 0) {
@@ -721,36 +903,66 @@ static int watermark_segment_native(const char *encrypted_ts_path, const char *w
     plain_input = av_asprintf("%s/input_plain.ts", workspace);
     plain_output = av_asprintf("%s/output_plain.ts", workspace);
     if (plain_input == NULL || plain_output == NULL) {
-        set_error(error, error_size, "out of memory");
+        set_error(error, error_size, "内存不足");
         goto cleanup;
     }
 
+    log_info("步骤1/4：开始解密 TS");
     if (decrypt_file_aes128(encrypted_ts_path, plain_input, key, iv, error, error_size) != 0) {
+        log_error("步骤1/4失败：%s", error);
         goto cleanup;
     }
+    log_info("步骤1/4完成：TS 解密成功，输出: %s", plain_input);
+    log_file_size("解密后明文TS", plain_input);
+
+    log_info("步骤2/4：读取 TS 媒体信息");
     if (read_segment_media_info(plain_input, &media_info, error, error_size) != 0) {
+        log_error("步骤2/4失败：%s", error);
         goto cleanup;
     }
+    log_info("步骤2/4完成：durationMs=%lld, totalBitrate=%d, videoBitrate=%d, audioBitrate=%d, hasAudio=%d",
+            (long long) media_info.duration_ms, media_info.total_bitrate, media_info.video_bitrate,
+            media_info.audio_bitrate, media_info.has_audio);
     profile = create_profile(&media_info);
+    log_info("目标编码参数：bitrateControlled=%d, videoBitrate=%d, maxVideoBitrate=%d, bufferSize=%d, muxRate=%d",
+            profile.bitrate_controlled, profile.video_bitrate, profile.max_video_bitrate,
+            profile.video_buffer_size, profile.mux_rate);
 
     if (build_ffmpeg_args(plain_input, watermark_path, plain_output, &profile,
             &argc, &argv, error, error_size) != 0) {
+        log_error("构建 FFmpeg 参数失败：%s", error);
         goto cleanup;
     }
+    log_ffmpeg_command(argc, argv);
 
+    log_info("步骤3/4：开始执行 FFmpeg 叠加水印");
+    reset_ffmpeg_log_buffer();
+    av_log_set_level(AV_LOG_INFO);
+    av_log_set_callback(ffmpeg_android_log_callback);
     ffmpeg_result = run(argc, argv);
     if (ffmpeg_result != 0) {
-        snprintf(error, error_size, "ffmpeg watermark failed with exit code %d", ffmpeg_result);
+        snprintf(error, error_size, "FFmpeg 叠加水印失败，退出码: %d", ffmpeg_result);
+        append_debug_hint(error, error_size, "；最近日志: ");
+        log_error("步骤3/4失败：%s", error);
         goto cleanup;
     }
+    log_info("步骤3/4完成：水印叠加成功，输出: %s", plain_output);
+    log_file_size("加水印后明文TS", plain_output);
 
+    log_info("步骤4/4：开始重新加密 TS");
     if (encrypt_file_aes128(plain_output, output_path, key, iv, error, error_size) != 0) {
+        log_error("步骤4/4失败：%s", error);
         goto cleanup;
     }
+    log_info("步骤4/4完成：重新加密成功，输出: %s", output_path);
+    log_file_size("最终加密TS", output_path);
 
     result = 0;
 
 cleanup:
+    if (result != 0 && error != NULL && error[0] == '\0') {
+        set_error(error, error_size, "处理失败，但未拿到明确错误信息，请查看 logcat 中的 TsWatermark 日志");
+    }
     free_args(argv, argc);
     cleanup_workspace(workspace);
     av_free(parent_dir);
@@ -765,7 +977,7 @@ Java_com_dongao_lib_tswatermark_EncryptedTsWatermarker_nativeWatermarkSegment(
         JNIEnv *env, jclass clazz, jstring encrypted_ts_path, jstring watermark_path,
         jstring output_path, jstring key, jstring iv)
 {
-    char error[256];
+    char error[ERROR_BUFFER_SIZE];
     char *encrypted_ts = NULL;
     char *watermark = NULL;
     char *output = NULL;
@@ -773,6 +985,7 @@ Java_com_dongao_lib_tswatermark_EncryptedTsWatermarker_nativeWatermarkSegment(
     char *iv_value = NULL;
 
     (void) clazz;
+    error[0] = '\0';
 
     encrypted_ts = dup_jstring(env, encrypted_ts_path);
     watermark = dup_jstring(env, watermark_path);
@@ -782,13 +995,14 @@ Java_com_dongao_lib_tswatermark_EncryptedTsWatermarker_nativeWatermarkSegment(
 
     if (encrypted_ts == NULL || watermark == NULL || output == NULL || key_value == NULL || iv_value == NULL) {
         if (!(*env)->ExceptionCheck(env)) {
-            throw_exception(env, "java/lang/OutOfMemoryError", "failed to allocate JNI strings");
+            throw_exception(env, "java/lang/OutOfMemoryError", "分配 JNI 字符串失败");
         }
         goto cleanup;
     }
 
     if (watermark_segment_native(encrypted_ts, watermark, output, key_value, iv_value,
             error, sizeof(error)) != 0) {
+        log_error("nativeWatermarkSegment 失败：%s", error);
         throw_exception(env, "java/lang/IllegalStateException", error);
     }
 

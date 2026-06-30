@@ -304,7 +304,6 @@ main() {
             --disable-runtime-cpudetect \
             --enable-pic \
             --enable-small \
-            --enable-hardcoded-tables \
             --disable-swscale-alpha \
             --disable-autodetect \
             --disable-network \
@@ -312,12 +311,6 @@ main() {
             --disable-avdevice \
             --disable-postproc \
             --disable-swresample \
-            --disable-bsfs \
-            --disable-parser=ac3 \
-            --disable-bsf=aac_adtstoasc \
-            --disable-bsf=hevc_mp4toannexb \
-            --disable-muxer=adts \
-            --disable-muxer=latm \
             --enable-zlib \
             --enable-gpl \
             --enable-nonfree \
@@ -328,11 +321,12 @@ main() {
             --enable-avfilter \
             --enable-swscale \
             --enable-encoder=libx264 \
-            --enable-decoder=h264,png \
-            --enable-parser=h264 \
+            --enable-decoder=h264,aac,png \
+            --enable-parser=h264,aac,ac3 \
             --enable-demuxer=mpegts,image2 \
-            --enable-muxer=mpegts \
+            --enable-muxer=mpegts,adts,latm \
             --enable-protocol=file \
+            --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
             --enable-filter=overlay,scale,format,buffer,buffersink \
             --extra-cflags="-Oz -fPIC -ffunction-sections -fdata-sections -fvisibility=hidden -fomit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables -I$PREFIX/include" \
             --extra-ldflags="-Wl,--gc-sections -L$PREFIX/lib"
