@@ -35,10 +35,13 @@ public final class EncryptedTsWatermarker {
             File plainOutput = new File(workspace, "output_plain.ts");
 
             Aes128SegmentCrypto.decrypt(encryptedTs, plainInput, key, iv);
+            SegmentMediaInfo mediaInfo = SegmentMediaInfoReader.read(plainInput);
+            WatermarkEncodingProfile encodingProfile = TargetBitrateCalculator.createProfile(mediaInfo);
             String[] command = FfmpegCommandBuilder.buildWatermarkTsCommand(
                     plainInput.getAbsolutePath(),
                     watermarkFile.getAbsolutePath(),
-                    plainOutput.getAbsolutePath());
+                    plainOutput.getAbsolutePath(),
+                    encodingProfile);
             int result = NativeFfmpegRunner.runCommand(command);
             if (result != 0) {
                 throw new IllegalStateException("ffmpeg watermark failed with exit code " + result);
