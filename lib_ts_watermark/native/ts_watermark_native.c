@@ -683,8 +683,8 @@ static int build_ffmpeg_args(const char *input_path, const char *watermark_path,
                              const WatermarkEncodingProfile *profile,
                              int *argc_out, char ***argv_out, char *error, size_t error_size)
 {
-    int argc = profile->bitrate_controlled ? 35 : 29;
-    char **argv = av_calloc((size_t)argc, sizeof(char *));
+    const int argv_capacity = 40;
+    char **argv = av_calloc((size_t)argv_capacity, sizeof(char *));
     int i = 0;
 
     if (argv == NULL) {
@@ -734,15 +734,15 @@ static int build_ffmpeg_args(const char *input_path, const char *watermark_path,
     argv[i++] = av_strdup("-y");
     argv[i++] = av_strdup(output_path);
 
-    for (int j = 0; j < argc; ++j) {
+    for (int j = 0; j < i; ++j) {
         if (argv[j] == NULL) {
-            free_args(argv, argc);
-            set_error(error, error_size, "构建 FFmpeg 参数失败，内存不足");
+            free_args(argv, i);
+            snprintf(error, error_size, "构建 FFmpeg 参数失败，第 %d 个参数分配内存失败", j + 1);
             return -1;
         }
     }
 
-    *argc_out = argc;
+    *argc_out = i;
     *argv_out = argv;
     return 0;
 }
